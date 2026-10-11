@@ -1,0 +1,261 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AudioEngine } from './audio/engine';
+import { ProceduralComposer } from './music/composer';
+import { getChordName, getScaleDegrees, midiToNoteName, SCALE_MODES } from './music/theory';
+import { serializeMidi } from './export/midi';
+import type { GeneratorSettings, NoteEvent } from './music/types';
+
+const defaultSettings: GeneratorSettings = {
+  tempo: 108,
+  key: 60,
+  mode: 'major',
+  style: 'ambient',
+  energy: 0.55,
+  complexity: 0.5,
+  novelty: 0.42,
+  mood: 'dreamy',
+  density: 0.6,
+};
+
+const styleOptions = ['ambient', 'cinematic', 'deep-house', 'techno', 'lo-fi', 'jazz', 'neo-classical', 'synthwave', 'minimal', 'experimental'];
+const majorModes = Object.keys(SCALE_MODES);
+
+export default function App() {
+  const engineRef = useRef<AudioEngine | null>(null);
+  const composerRef = useRef<ProceduralComposer | null>(null);
+  const [settings, setSettings] = useState<GeneratorSettings>(defaultSettings);
+  const [playing, setPlaying] = useState(false);
+  const [phraseCounter, setPhraseCounter] = useState(0);
+  const [liveChord, setLiveChord] = useState('Cmaj7');
+  const [phrasePreview, setPhrasePreview] = useState<NoteEvent[]>([]);
+  const [isReady, setIsReady] = useState(false);
+
+  useEffect(() => {
+    composerRef.current = new ProceduralComposer(settings);
+  }, [settings]);
+
+  useEffect(() => {
+    if (!engineRef.current) {
+      engineRef.current = new AudioEngine();
+    }
+    engineRef.current.setTempo(settings.tempo);
+  }, [settings.tempo]);
+
+  useEffect(() => {
+    if (!composerRef.current) return;
+    const preview = composerRef.current.generatePhrase(4);
+    setPhrasePreview(preview);
+    const rootChord = getChordName(settings.key, settings.mode, 0);
+    setLiveChord(rootChord);
+  }, [settings.key, settings.mode, settings.style, settings.energy, settings.novelty]);
+
+  const phraseDuration = useMemo(() => (60 / settings.tempo) * 4 * 0.9, [settings.tempo]);
+
+  const updateSetting = <K extends keyof GeneratorSettings>(key: K, value: GeneratorSettings[K]) => {
+    setSettings((current) => ({ ...current, [key]: value }));
+  };
+
+  const buildPhrase = async () => {
+    if (!composerRef.current) return;
+    const nextPhrase = composerRef.current.generatePhrase(4);
+    if (engineRef.current) {
+      engineRef.current.playPhrase(nextPhrase);
+    }
+    setPhrasePreview(nextPhrase);
+    const nextChord = getChordName(settings.key, settings.mode, phraseCounter % 4);
+    setLiveChord(nextChord);
+    setPhraseCounter((count) => count + 1);
+  };
+
+  const handlePlay = async () => {
+    if (!engineRef.current) {
+      engineRef.current = new AudioEngine();
+    }
+
+    await engineRef.current.ensureReady();
+    setIsReady(true);
+
+    if (!playing) {
+      const initialPhrase = composerRef.current?.generatePhrase(4) ?? [];
+      engineRef.current.playPhrase(initialPhrase);
+      setPhrasePreview(initialPhrase);
+      setPlaying(true);
+
+      const loop = window.setInterval(() => {
+        if (!engineRef.current || !composerRef.current) return;
+        if (!document.hidden) {
+          void buildPhrase();
+        }
+      }, phraseDuration * 1000);
+
+      (window as any).__infinite_music_loop = loop;
+    }
+  };
+
+  const handlePause = () => {
+    const loopId = (window as any).__infinite_music_loop;
+    if (loopId) {
+      window.clearInterval(loopId);
+      delete (window as any).__infinite_music_loop;
+    }
+    setPlaying(false);
+  };
+
+  const handleExport = () => {
+    const bytes = serializeMidi(phrasePreview, settings.tempo);
+    const blob = new Blob([bytes], { type: 'audio/midi' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `infinite-music-${settings.style}.mid`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const scaleDegrees = useMemo(() => getScaleDegrees(settings.key, settings.mode), [settings.key, settings.mode]);
+
+  return (
+    <div className="app-shell">
+      <aside className="panel side-panel">
+        <div className="brand-block">
+          <span className="eyebrow">LOCAL GENERATIVE</span>
+          <h1>Infinite Music</h1>
+        </div>
+
+        <div className="control-group">
+          <button className="primary-button" onClick={playing ? handlePause : handlePlay}>
+            {playing ? 'Pause' : 'Play'}
+          </button>
+          <button className="secondary-button" onClick={handleExport}>Export MIDI</button>
+        </div>
+
+        <label>
+          <span>Tempo</span>
+          <input type="range" min="70" max="160" value={settings.tempo} onChange={(e) => updateSetting('tempo', Number(e.target.value))} />
+          <strong>{settings.tempo} BPM</strong>
+        </label>
+
+        <label>
+          <span>Key</span>
+          <select value={settings.key} onChange={(e) => updateSetting('key', Number(e.target.value))}>
+            {Array.from({ length: 12 }, (_, index) => {
+              const midi = 48 + index;
+              return (
+                <option key={midi} value={midi}>
+                  {midiToNoteName(midi)}
+                </option>
+              );
+            })}
+          </select>
+        </label>
+
+        <label>
+          <span>Scale</span>
+          <select value={settings.mode} onChange={(e) => updateSetting('mode', e.target.value as GeneratorSettings['mode'])}>
+            {majorModes.map((mode) => (
+              <option key={mode} value={mode}>
+                {mode}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          <span>Style</span>
+          <select value={settings.style} onChange={(e) => updateSetting('style', e.target.value as GeneratorSettings['style'])}>
+            {styleOptions.map((style) => (
+              <option key={style} value={style}>
+                {style}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          <span>Mood</span>
+          <input type="text" value={settings.mood} onChange={(e) => updateSetting('mood', e.target.value)} />
+        </label>
+
+        <div className="slider-grid">
+          <label>
+            <span>Energy</span>
+            <input type="range" min="0" max="1" step="0.01" value={settings.energy} onChange={(e) => updateSetting('energy', Number(e.target.value))} />
+          </label>
+          <label>
+            <span>Complexity</span>
+            <input type="range" min="0" max="1" step="0.01" value={settings.complexity} onChange={(e) => updateSetting('complexity', Number(e.target.value))} />
+          </label>
+          <label>
+            <span>Novelty</span>
+            <input type="range" min="0" max="1" step="0.01" value={settings.novelty} onChange={(e) => updateSetting('novelty', Number(e.target.value))} />
+          </label>
+          <label>
+            <span>Density</span>
+            <input type="range" min="0" max="1" step="0.01" value={settings.density} onChange={(e) => updateSetting('density', Number(e.target.value))} />
+          </label>
+        </div>
+      </aside>
+
+      <main className="main-stage">
+        <div className="visualizer-panel">
+          <div className="status-row">
+            <div>
+              <span className="eyebrow">Active section</span>
+              <h2>{settings.style}</h2>
+            </div>
+            <div>
+              <span className="eyebrow">Chord</span>
+              <h3>{liveChord}</h3>
+            </div>
+          </div>
+
+          <div className="visualizer" aria-label="Live music visualizer">
+            {[...Array(32)].map((_, index) => (
+              <span
+                key={index}
+                className="bar"
+                style={{
+                  height: `${40 + ((index + phraseCounter) % 8) * 9 + (settings.energy * 48)}px`,
+                  opacity: 0.2 + ((index + phraseCounter) % 9) * 0.08,
+                }}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div className="info-grid">
+          <div className="info-card">
+            <span className="label">Scale</span>
+            <strong>{settings.mode}</strong>
+          </div>
+          <div className="info-card">
+            <span className="label">Key</span>
+            <strong>{midiToNoteName(settings.key)}</strong>
+          </div>
+          <div className="info-card">
+            <span className="label">Mood</span>
+            <strong>{settings.mood}</strong>
+          </div>
+          <div className="info-card">
+            <span className="label">Phrase</span>
+            <strong>{phraseCounter}</strong>
+          </div>
+        </div>
+
+        <div className="timeline-panel">
+          <div className="timeline-header">
+            <span className="eyebrow">Evolution timeline</span>
+            <span>{scaleDegrees.slice(0, 7).map((degree) => `${midiToNoteName(degree)}`).join(' • ')}</span>
+          </div>
+          <div className="timeline">
+            {[...Array(16)].map((_, idx) => (
+              <div key={idx} className="pulse" style={{ width: `${Math.max(12, 34 + settings.novelty * 50)}px` }} />
+            ))}
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
